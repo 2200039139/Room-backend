@@ -7,6 +7,7 @@ const jwt = require('jsonwebtoken');
 const { OAuth2Client } = require('google-auth-library');
 
 const app = express();
+const port = 5000;
 
 // JWT Secret (use environment variable in production)
 const JWT_SECRET = 'a4bf7c0d30d87039b415c39eb5afbf3dce4933e2d12382bc04eed9557420b1b9c98c27762fff2653d0cc260dec481f698d94957dc2f3ccac856b9e6385637a5b';
@@ -19,11 +20,10 @@ app.use(cors());
 app.use(bodyParser.json());
 
 // MySQL Connection
-// MySQL Connection
 const db = mysql.createConnection({
   host: 'localhost',
-  user: 'root',
-  password: 'Sai1234',
+  user: 'root',       // replace with your MySQL username
+  password: 'Sai1234',       // replace with your MySQL password
   database: 'roommate_expenses'
 });
 
@@ -48,6 +48,7 @@ db.connect(err => {
     )
   `;
   
+  // Updated roommates table with userId foreign key
   const createRoommatesTable = `
     CREATE TABLE IF NOT EXISTS roommates (
       id INT AUTO_INCREMENT PRIMARY KEY,
@@ -57,6 +58,7 @@ db.connect(err => {
     )
   `;
   
+  // Updated expenses table with userId foreign key
   const createExpensesTable = `
     CREATE TABLE IF NOT EXISTS expenses (
       id INT AUTO_INCREMENT PRIMARY KEY,
@@ -66,21 +68,6 @@ db.connect(err => {
       date DATE NOT NULL,
       userId INT NOT NULL,
       FOREIGN KEY (paidBy) REFERENCES roommates(id) ON DELETE CASCADE,
-      FOREIGN KEY (userId) REFERENCES users(id) ON DELETE CASCADE
-    )
-  `;
-
-  const createSettlementsTable = `
-    CREATE TABLE IF NOT EXISTS settlements (
-      id INT AUTO_INCREMENT PRIMARY KEY,
-      fromId INT NOT NULL,
-      toId INT NOT NULL,
-      amount DECIMAL(10, 2) NOT NULL,
-      date DATE NOT NULL,
-      userId INT NOT NULL,
-      createdAt TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-      FOREIGN KEY (fromId) REFERENCES roommates(id) ON DELETE CASCADE,
-      FOREIGN KEY (toId) REFERENCES roommates(id) ON DELETE CASCADE,
       FOREIGN KEY (userId) REFERENCES users(id) ON DELETE CASCADE
     )
   `;
@@ -98,11 +85,6 @@ db.connect(err => {
   db.query(createExpensesTable, (err) => {
     if (err) console.error('Error creating expenses table:', err);
     else console.log('Expenses table ready');
-  });
-
-  db.query(createSettlementsTable, (err) => {
-    if (err) console.error('Error creating settlements table:', err);
-    else console.log('Settlements table ready');
   });
 });
 
@@ -124,34 +106,31 @@ const authenticateToken = (req, res, next) => {
   }
 };
 
-// Helper function for promise-based queries
-const query = (sql, values) => {
-  return new Promise((resolve, reject) => {
-    db.query(sql, values, (err, results) => {
-      if (err) return reject(err);
-      resolve(results);
-    });
-  });
-};
+// API Routes
 
-// USER AUTHENTICATION ROUTES (UNCHANGED)
+// USER AUTHENTICATION ROUTES
+// User Registration Endpoint
 app.post('/api/users/register', async (req, res) => {
   try {
     const { fullName, email, password } = req.body;
     
+    // Validate required fields
     if (!fullName || !email || !password) {
       return res.status(400).json({ error: 'Please provide all required fields' });
     }
     
+    // Validate email format
     const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
     if (!emailRegex.test(email)) {
       return res.status(400).json({ error: 'Please provide a valid email address' });
     }
     
+    // Validate password length
     if (password.length < 8) {
       return res.status(400).json({ error: 'Password must be at least 8 characters long' });
     }
     
+    // Check if user already exists
     db.query('SELECT * FROM users WHERE email = ?', [email], async (err, results) => {
       if (err) {
         console.error('Database error:', err);
@@ -162,9 +141,11 @@ app.post('/api/users/register', async (req, res) => {
         return res.status(400).json({ error: 'User with this email already exists' });
       }
       
+      // Hash the password
       const salt = await bcrypt.genSalt(10);
       const hashedPassword = await bcrypt.hash(password, salt);
       
+      // Insert new user
       db.query(
         'INSERT INTO users (fullName, email, password) VALUES (?, ?, ?)',
         [fullName, email, hashedPassword],
@@ -176,12 +157,14 @@ app.post('/api/users/register', async (req, res) => {
           
           const userId = result.insertId;
           
+          // Create JWT token
           const token = jwt.sign(
             { id: userId, email, fullName },
             JWT_SECRET,
             { expiresIn: '24h' }
           );
           
+          // Return user data (excluding password) and token
           const user = {
             id: userId,
             fullName,
@@ -202,6 +185,326 @@ app.post('/api/users/register', async (req, res) => {
   }
 });
 
+// Google Authentication Endpoint
+app.post('/api/users/google-auth', async (req, res) => {
+  try {
+    const { token } = req.body;
+    
+    if (!token) {
+      return res.status(400).json({ error: 'Token is required' });
+    }
+    
+    // Verify Google token
+    const ticket = await googleClient.verifyIdToken({
+      idToken: token,
+      audience: '37085501976-b54lfva9uchil1jq6boc6vt4jb1bqb5d.apps.googleusercontent.com'
+    });
+    
+    const payload = ticket.getPayload();
+    const { sub: googleId, email, name } = payload;
+    
+    // Check if user already exists with this Google ID or email
+    db.query(
+      'SELECT * FROM users WHERE googleId = ? OR email = ?',
+      [googleId, email],
+      (err, results) => {
+        if (err) {
+          console.error('Database error:', err);
+          return res.status(500).json({ error: 'Server error' });
+        }
+        
+        if (results.length > 0) {
+          // User exists, update Google ID if needed and log them in
+          const user = results[0];
+          
+          // If user exists with email but not with Google ID, update their record
+          if (!user.googleId) {
+            db.query(
+              'UPDATE users SET googleId = ? WHERE id = ?',
+              [googleId, user.id],
+              (err) => {
+                if (err) {
+                  console.error('Error updating user with Google ID:', err);
+                }
+              }
+            );
+          }
+          
+          // Create JWT token
+          const token = jwt.sign(
+            { id: user.id, email: user.email, fullName: user.fullName },
+            JWT_SECRET,
+            { expiresIn: '24h' }
+          );
+          
+          // Return user data and token
+          const userData = {
+            id: user.id,
+            fullName: user.fullName,
+            email: user.email
+          };
+          
+          return res.json({
+            message: 'Login successful',
+            user: userData,
+            token
+          });
+        } else {
+          // Create new user with Google data
+          db.query(
+            'INSERT INTO users (fullName, email, googleId) VALUES (?, ?, ?)',
+            [name, email, googleId],
+            (err, result) => {
+              if (err) {
+                console.error('Error creating user with Google data:', err);
+                return res.status(500).json({ error: 'Failed to create user' });
+              }
+              
+              const userId = result.insertId;
+              
+              // Create JWT token
+              const token = jwt.sign(
+                { id: userId, email, fullName: name },
+                JWT_SECRET,
+                { expiresIn: '24h' }
+              );
+              
+              // Return user data and token
+              const userData = {
+                id: userId,
+                fullName: name,
+                email
+              };
+              
+              res.status(201).json({
+                message: 'User registered successfully with Google',
+                user: userData,
+                token
+              });
+            }
+          );
+        }
+      }
+    );
+  } catch (error) {
+    console.error('Google authentication error:', error);
+    res.status(500).json({ error: 'Failed to authenticate with Google' });
+  }
+});
+
+// User Login Endpoint
+app.post('/api/users/login', async (req, res) => {
+  try {
+    const { email, password } = req.body;
+    
+    // Validate required fields
+    if (!email || !password) {
+      return res.status(400).json({ error: 'Please provide email and password' });
+    }
+    
+    // Find user by email
+    db.query('SELECT * FROM users WHERE email = ?', [email], async (err, results) => {
+      if (err) {
+        console.error('Database error:', err);
+        return res.status(500).json({ error: 'Server error' });
+      }
+      
+      if (results.length === 0) {
+        return res.status(401).json({ error: 'Invalid credentials' });
+      }
+      
+      const user = results[0];
+      
+      // Compare passwords
+      const isMatch = await bcrypt.compare(password, user.password);
+      
+      if (!isMatch) {
+        return res.status(401).json({ error: 'Invalid credentials' });
+      }
+      
+      // Create JWT token
+      const token = jwt.sign(
+        { id: user.id, email: user.email, fullName: user.fullName },
+        JWT_SECRET,
+        { expiresIn: '24h' }
+      );
+      
+      // Return user data (excluding password) and token
+      const userData = {
+        id: user.id,
+        fullName: user.fullName,
+        email: user.email
+      };
+      
+      res.json({
+        message: 'Login successful',
+        user: userData,
+        token
+      });
+    });
+  } catch (error) {
+    console.error('Login error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// Get user profile
+app.get('/api/users/me', authenticateToken, (req, res) => {
+  db.query('SELECT id, fullName, email FROM users WHERE id = ?', [req.user.id], (err, results) => {
+    if (err) {
+      return res.status(500).json({ error: err.message });
+    }
+    
+    if (results.length === 0) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+    
+    res.json(results[0]);
+  });
+});
+
+// ROOMMATE ROUTES
+
+// Get all roommates (filtered by logged-in user)
+app.get('/api/roommates', authenticateToken, (req, res) => {
+  db.query('SELECT * FROM roommates WHERE userId = ?', [req.user.id], (err, results) => {
+    if (err) {
+      return res.status(500).json({ error: err.message });
+    }
+    res.json(results);
+  });
+});
+
+// Add a new roommate (associated with logged-in user)
+app.post('/api/roommates', authenticateToken, (req, res) => {
+  const { name } = req.body;
+  const userId = req.user.id;
+  
+  if (!name || name.trim() === '') {
+    return res.status(400).json({ error: 'Roommate name is required' });
+  }
+  
+  db.query('INSERT INTO roommates (name, userId) VALUES (?, ?)', [name, userId], (err, result) => {
+    if (err) {
+      return res.status(500).json({ error: err.message });
+    }
+    
+    const id = result.insertId;
+    res.status(201).json({ id, name, userId });
+  });
+});
+
+// Remove a roommate (checking ownership)
+app.delete('/api/roommates/:id', authenticateToken, (req, res) => {
+  const id = req.params.id;
+  const userId = req.user.id;
+  
+  // Check if roommate belongs to this user
+  db.query('SELECT * FROM roommates WHERE id = ? AND userId = ?', [id, userId], (err, results) => {
+    if (err) {
+      return res.status(500).json({ error: err.message });
+    }
+    
+    if (results.length === 0) {
+      return res.status(404).json({ error: 'Roommate not found or not authorized' });
+    }
+    
+    // If found and authorized, delete the roommate
+    db.query('DELETE FROM roommates WHERE id = ?', [id], (err, result) => {
+      if (err) {
+        return res.status(500).json({ error: err.message });
+      }
+      
+      res.json({ message: 'Roommate deleted successfully' });
+    });
+  });
+});
+
+// EXPENSE ROUTES
+
+// Get all expenses (filtered by logged-in user)
+app.get('/api/expenses', authenticateToken, (req, res) => {
+  db.query('SELECT * FROM expenses WHERE userId = ?', [req.user.id], (err, results) => {
+    if (err) {
+      return res.status(500).json({ error: err.message });
+    }
+    res.json(results);
+  });
+});
+
+// Add a new expense (associated with logged-in user)
+app.post('/api/expenses', authenticateToken, (req, res) => {
+  const { description, amount, paidBy, date } = req.body;
+  const userId = req.user.id;
+  
+  if (!description || description.trim() === '') {
+    return res.status(400).json({ error: 'Description is required' });
+  }
+  
+  if (!amount || isNaN(parseFloat(amount)) || parseFloat(amount) <= 0) {
+    return res.status(400).json({ error: 'Valid amount is required' });
+  }
+  
+  if (!paidBy) {
+    return res.status(400).json({ error: 'Paid by is required' });
+  }
+  
+  if (!date) {
+    return res.status(400).json({ error: 'Date is required' });
+  }
+  
+  // Verify that the paidBy roommate belongs to this user
+  db.query('SELECT * FROM roommates WHERE id = ? AND userId = ?', [paidBy, userId], (err, results) => {
+    if (err) {
+      return res.status(500).json({ error: err.message });
+    }
+    
+    if (results.length === 0) {
+      return res.status(400).json({ error: 'Invalid roommate selected' });
+    }
+    
+    // Insert the expense with user ID
+    db.query(
+      'INSERT INTO expenses (description, amount, paidBy, date, userId) VALUES (?, ?, ?, ?, ?)',
+      [description, amount, paidBy, date, userId],
+      (err, result) => {
+        if (err) {
+          return res.status(500).json({ error: err.message });
+        }
+        
+        const id = result.insertId;
+        res.status(201).json({ id, description, amount, paidBy, date, userId });
+      }
+    );
+  });
+});
+
+// Delete an expense (checking ownership)
+app.delete('/api/expenses/:id', authenticateToken, (req, res) => {
+  const id = req.params.id;
+  const userId = req.user.id;
+  
+  // Check if expense belongs to this user
+  db.query('SELECT * FROM expenses WHERE id = ? AND userId = ?', [id, userId], (err, results) => {
+    if (err) {
+      return res.status(500).json({ error: err.message });
+    }
+    
+    if (results.length === 0) {
+      return res.status(404).json({ error: 'Expense not found or not authorized' });
+    }
+    
+    // If found and authorized, delete the expense
+    db.query('DELETE FROM expenses WHERE id = ?', [id], (err, result) => {
+      if (err) {
+        return res.status(500).json({ error: err.message });
+      }
+      
+      res.json({ message: 'Expense deleted successfully' });
+    });
+  });
+});
+// Google Authentication Endpoint
 app.post('/api/users/google-auth', async (req, res) => {
   try {
     const { token } = req.body;
@@ -213,6 +516,7 @@ app.post('/api/users/google-auth', async (req, res) => {
     }
     
     try {
+      // Verify Google token
       const ticket = await googleClient.verifyIdToken({
         idToken: token,
         audience: '37085501976-b54lfva9uchil1jq6boc6vt4jb1bqb5d.apps.googleusercontent.com'
@@ -227,6 +531,7 @@ app.post('/api/users/google-auth', async (req, res) => {
       
       const { sub: googleId, email, name } = payload;
       
+      // Check if user already exists with this Google ID or email
       db.query(
         'SELECT * FROM users WHERE googleId = ? OR email = ?',
         [googleId, email],
@@ -237,8 +542,10 @@ app.post('/api/users/google-auth', async (req, res) => {
           }
           
           if (results.length > 0) {
+            // User exists, update Google ID if needed and log them in
             const user = results[0];
             
+            // If user exists with email but not with Google ID, update their record
             if (!user.googleId) {
               db.query(
                 'UPDATE users SET googleId = ? WHERE id = ?',
@@ -251,12 +558,14 @@ app.post('/api/users/google-auth', async (req, res) => {
               );
             }
             
+            // Create JWT token
             const token = jwt.sign(
               { id: user.id, email: user.email, fullName: user.fullName },
               JWT_SECRET,
               { expiresIn: '24h' }
             );
             
+            // Return user data and token
             const userData = {
               id: user.id,
               fullName: user.fullName,
@@ -269,6 +578,7 @@ app.post('/api/users/google-auth', async (req, res) => {
               token
             });
           } else {
+            // Create new user with Google data
             db.query(
               'INSERT INTO users (fullName, email, googleId) VALUES (?, ?, ?)',
               [name, email, googleId],
@@ -280,12 +590,14 @@ app.post('/api/users/google-auth', async (req, res) => {
                 
                 const userId = result.insertId;
                 
+                // Create JWT token
                 const token = jwt.sign(
                   { id: userId, email, fullName: name },
                   JWT_SECRET,
                   { expiresIn: '24h' }
                 );
                 
+                // Return user data and token
                 const userData = {
                   id: userId,
                   fullName: name,
@@ -312,275 +624,6 @@ app.post('/api/users/google-auth', async (req, res) => {
   }
 });
 
-app.post('/api/users/login', async (req, res) => {
-  try {
-    const { email, password } = req.body;
-    
-    if (!email || !password) {
-      return res.status(400).json({ error: 'Please provide email and password' });
-    }
-    
-    db.query('SELECT * FROM users WHERE email = ?', [email], async (err, results) => {
-      if (err) {
-        console.error('Database error:', err);
-        return res.status(500).json({ error: 'Server error' });
-      }
-      
-      if (results.length === 0) {
-        return res.status(401).json({ error: 'Invalid credentials' });
-      }
-      
-      const user = results[0];
-      
-      const isMatch = await bcrypt.compare(password, user.password);
-      
-      if (!isMatch) {
-        return res.status(401).json({ error: 'Invalid credentials' });
-      }
-      
-      const token = jwt.sign(
-        { id: user.id, email: user.email, fullName: user.fullName },
-        JWT_SECRET,
-        { expiresIn: '24h' }
-      );
-      
-      const userData = {
-        id: user.id,
-        fullName: user.fullName,
-        email: user.email
-      };
-      
-      res.json({
-        message: 'Login successful',
-        user: userData,
-        token
-      });
-    });
-  } catch (error) {
-    console.error('Login error:', error);
-    res.status(500).json({ error: 'Server error' });
-  }
-});
-
-app.get('/api/users/me', authenticateToken, (req, res) => {
-  db.query('SELECT id, fullName, email FROM users WHERE id = ?', [req.user.id], (err, results) => {
-    if (err) {
-      return res.status(500).json({ error: err.message });
-    }
-    
-    if (results.length === 0) {
-      return res.status(404).json({ error: 'User not found' });
-    }
-    
-    res.json(results[0]);
-  });
-});
-
-// ROOMMATE ROUTES (UNCHANGED)
-app.get('/api/roommates', authenticateToken, (req, res) => {
-  db.query('SELECT * FROM roommates WHERE userId = ?', [req.user.id], (err, results) => {
-    if (err) {
-      return res.status(500).json({ error: err.message });
-    }
-    res.json(results);
-  });
-});
-
-app.post('/api/roommates', authenticateToken, (req, res) => {
-  const { name } = req.body;
-  const userId = req.user.id;
-  
-  if (!name || name.trim() === '') {
-    return res.status(400).json({ error: 'Roommate name is required' });
-  }
-  
-  db.query('INSERT INTO roommates (name, userId) VALUES (?, ?)', [name, userId], (err, result) => {
-    if (err) {
-      return res.status(500).json({ error: err.message });
-    }
-    
-    const id = result.insertId;
-    res.status(201).json({ id, name, userId });
-  });
-});
-
-app.delete('/api/roommates/:id', authenticateToken, (req, res) => {
-  const id = req.params.id;
-  const userId = req.user.id;
-  
-  db.query('SELECT * FROM roommates WHERE id = ? AND userId = ?', [id, userId], (err, results) => {
-    if (err) {
-      return res.status(500).json({ error: err.message });
-    }
-    
-    if (results.length === 0) {
-      return res.status(404).json({ error: 'Roommate not found or not authorized' });
-    }
-    
-    db.query('DELETE FROM roommates WHERE id = ?', [id], (err, result) => {
-      if (err) {
-        return res.status(500).json({ error: err.message });
-      }
-      
-      res.json({ message: 'Roommate deleted successfully' });
-    });
-  });
-});
-
-// EXPENSE ROUTES (UNCHANGED)
-app.get('/api/expenses', authenticateToken, (req, res) => {
-  db.query('SELECT * FROM expenses WHERE userId = ?', [req.user.id], (err, results) => {
-    if (err) {
-      return res.status(500).json({ error: err.message });
-    }
-    res.json(results);
-  });
-});
-
-app.post('/api/expenses', authenticateToken, (req, res) => {
-  const { description, amount, paidBy, date } = req.body;
-  const userId = req.user.id;
-  
-  if (!description || description.trim() === '') {
-    return res.status(400).json({ error: 'Description is required' });
-  }
-  
-  if (!amount || isNaN(parseFloat(amount)) || parseFloat(amount) <= 0) {
-    return res.status(400).json({ error: 'Valid amount is required' });
-  }
-  
-  if (!paidBy) {
-    return res.status(400).json({ error: 'Paid by is required' });
-  }
-  
-  if (!date) {
-    return res.status(400).json({ error: 'Date is required' });
-  }
-  
-  db.query('SELECT * FROM roommates WHERE id = ? AND userId = ?', [paidBy, userId], (err, results) => {
-    if (err) {
-      return res.status(500).json({ error: err.message });
-    }
-    
-    if (results.length === 0) {
-      return res.status(400).json({ error: 'Invalid roommate selected' });
-    }
-    
-    db.query(
-      'INSERT INTO expenses (description, amount, paidBy, date, userId) VALUES (?, ?, ?, ?, ?)',
-      [description, amount, paidBy, date, userId],
-      (err, result) => {
-        if (err) {
-          return res.status(500).json({ error: err.message });
-        }
-        
-        const id = result.insertId;
-        res.status(201).json({ id, description, amount, paidBy, date, userId });
-      }
-    );
-  });
-});
-
-app.delete('/api/expenses/:id', authenticateToken, (req, res) => {
-  const id = req.params.id;
-  const userId = req.user.id;
-  
-  db.query('SELECT * FROM expenses WHERE id = ? AND userId = ?', [id, userId], (err, results) => {
-    if (err) {
-      return res.status(500).json({ error: err.message });
-    }
-    
-    if (results.length === 0) {
-      return res.status(404).json({ error: 'Expense not found or not authorized' });
-    }
-    
-    db.query('DELETE FROM expenses WHERE id = ?', [id], (err, result) => {
-      if (err) {
-        return res.status(500).json({ error: err.message });
-      }
-      
-      res.json({ message: 'Expense deleted successfully' });
-    });
-  });
-});
-
-// NEW SETTLEMENT ROUTES
-app.post('/api/settlements', authenticateToken, async (req, res) => {
-  try {
-    const { fromId, toId, amount, date } = req.body;
-    const userId = req.user.id;
-    
-    if (!fromId || !toId || !amount || !date) {
-      return res.status(400).json({ error: 'All fields are required' });
-    }
-    
-    // Verify roommates belong to this user
-    const [fromRoommate] = await query('SELECT * FROM roommates WHERE id = ? AND userId = ?', [fromId, userId]);
-    const [toRoommate] = await query('SELECT * FROM roommates WHERE id = ? AND userId = ?', [toId, userId]);
-    
-    if (!fromRoommate || !toRoommate) {
-      return res.status(400).json({ error: 'Invalid roommates selected' });
-    }
-    
-    // Insert settlement
-    const result = await query(
-      'INSERT INTO settlements (fromId, toId, amount, date, userId) VALUES (?, ?, ?, ?, ?)',
-      [fromId, toId, amount, date, userId]
-    );
-    
-    // Get the full settlement with names to return
-    const [settlement] = await query(`
-      SELECT s.*, r1.name as fromName, r2.name as toName 
-      FROM settlements s
-      JOIN roommates r1 ON s.fromId = r1.id
-      JOIN roommates r2 ON s.toId = r2.id
-      WHERE s.id = ?
-    `, [result.insertId]);
-    
-    res.status(201).json(settlement);
-  } catch (error) {
-    console.error('Add settlement error:', error);
-    res.status(500).json({ error: 'Server error' });
-  }
-});
-
-app.get('/api/settlements', authenticateToken, async (req, res) => {
-  try {
-    const settlements = await query(`
-      SELECT s.*, r1.name as fromName, r2.name as toName 
-      FROM settlements s
-      JOIN roommates r1 ON s.fromId = r1.id
-      JOIN roommates r2 ON s.toId = r2.id
-      WHERE s.userId = ?
-      ORDER BY s.date DESC
-    `, [req.user.id]);
-    
-    res.json(settlements);
-  } catch (error) {
-    console.error('Get settlements error:', error);
-    res.status(500).json({ error: 'Server error' });
-  }
-});
-
-app.delete('/api/settlements/:id', authenticateToken, async (req, res) => {
-  try {
-    const { id } = req.params;
-    const userId = req.user.id;
-    
-    // Verify settlement belongs to this user
-    const [settlement] = await query('SELECT * FROM settlements WHERE id = ? AND userId = ?', [id, userId]);
-    
-    if (!settlement) {
-      return res.status(404).json({ error: 'Settlement not found or not authorized' });
-    }
-    
-    await query('DELETE FROM settlements WHERE id = ?', [id]);
-    res.json({ message: 'Settlement deleted successfully' });
-  } catch (error) {
-    console.error('Delete settlement error:', error);
-    res.status(500).json({ error: 'Server error' });
-  }
-});
 
 // Start server
 app.listen(port, () => {
