@@ -20,12 +20,9 @@ app.use(cors());
 app.use(bodyParser.json());
 
 // MySQL Connection
-const db = mysql.createConnection({
-  host: 'mysql-n4va.railway.internal',
-  user: 'root',       // replace with your MySQL username
-  password: 'gSomAHMBNTNEzgODaOXOknNWBtBEAPvU',       // replace with your MySQL password
-  database: 'railway'
-});
+const db = mysql.createConnection(
+  'mysql://root:McWbhXTgGxivciaxRUwSwZxbkTunHvuj@hopper.proxy.rlwy.net:13585/railway'
+);
 
 // Connect to MySQL
 db.connect(err => {
