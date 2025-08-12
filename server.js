@@ -21,10 +21,10 @@ app.use(bodyParser.json());
 
 // MySQL Connection
 const db = mysql.createConnection({
-  host: 'localhost',
+  host: 'mysql-n4va.railway.internal',
   user: 'root',       // replace with your MySQL username
-  password: 'Sai1234',       // replace with your MySQL password
-  database: 'roommate_expenses'
+  password: 'gSomAHMBNTNEzgODaOXOknNWBtBEAPvU',       // replace with your MySQL password
+  database: 'railway'
 });
 
 // Connect to MySQL
